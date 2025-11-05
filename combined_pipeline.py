@@ -1,3 +1,8 @@
+# https://stackoverflow.com/questions/11161901/how-to-install-python-modules-in-blender
+import pip
+pip.main(['install', 'imageio[ffmpeg]', '--user'])
+pip.main(['install', 'tqdm', '--user'])
+
 import os
 import json
 import subprocess
@@ -10,6 +15,7 @@ import imageio.v2 as imageio
 import bpy
 import math
 import mathutils
+import numpy as np
 
 # Try to import tqdm, and in case its not available use fallbackkk
 # 4 grid -albedo normal 2 lighting ; specular, metallic; upload github and server;
@@ -56,19 +62,32 @@ except ImportError:
 
 # Input and Output Paths
 INPUT_DIR = r"C:\Users\kdharanikota\Desktop\final_pipeline\combined_pipeline\test_objects"
-OUTPUT_ROOT = r"C:\Users\kdharanikota\Desktop\final_pipeline\main\output_trial1"
-RESULTS_DIR = r"C:\Users\kdharanikota\Desktop\final_pipeline\main\results_trial1"
+OUTPUT_ROOT = r"C:\Users\kdharanikota\Desktop\final_pipeline\main\output_final"
+RESULTS_DIR = r"C:\Users\kdharanikota\Desktop\final_pipeline\main\output_final\logs"
 
 # Blender Paths
-BLENDER_ROOT = r"C:\Users\kdharanikota\Desktop\final_pipeline\blender-3.6.23-windows-x64"
 BLENDER_PATH = r"C:\Users\kdharanikota\Desktop\final_pipeline\blender-3.6.23-windows-x64\blender.exe"
+BLENDER_ROOT = os.path.dirname(BLENDER_PATH)
 
-# Custom HDR Directory (optional - for additional HDR files)
-CUSTOM_HDR_DIR = r"C:\Users\kdharanikota\Desktop\final_pipeline\custom_hdr"
+# --- Linux overrides via environment variables (no feature changes) ---
+import os
+INPUT_DIR   = os.environ.get("INPUT_DIR",   INPUT_DIR).replace("\\", "/")
+OUTPUT_ROOT = os.environ.get("OUTPUT_DIR",  OUTPUT_ROOT).replace("\\", "/")
+RESULTS_DIR = os.environ.get("RESULTS_DIR", OUTPUT_ROOT + "/logs").replace("\\", "/")
+
+BLENDER_PATH = os.environ.get("BLENDER_PATH", BLENDER_PATH).replace("\\", "/")
+BLENDER_ROOT = os.path.dirname(BLENDER_PATH)
+# --- end overrides ---
+
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # File Extensions to Process
 FILE_EXTENSIONS = ['.blend', '.fbx', '.obj', '.glb', '.gltf']
 # '.stl', '.dae', '.ply', '.abc', '.usd', '.usda', '.usdc'
+
+OLAT_ROOT='/home/jyang/projects/ObjectReal/external/cosmos-transfer1-diffusion-renderer/asset/evaluation_results/step00000/lightstage/diffusion_renderer_inverse_original/vis/hdri'
+OLAT_DEBUG_ROOT = '/labworking/Users/jyang/data/lightProbe/olat/octahedron/6vertices/equirectangular/hdr'
 
 # Environment Maps for Rendering (8 unique lighting conditions)
 ENVIRONMENT_MAPS = [
@@ -79,20 +98,27 @@ ENVIRONMENT_MAPS = [
     'sunrise',     # Early morning sunrise
     'forest',      # Natural forest environment
     'courtyard',   # Outdoor courtyard
-    'interior'     # Indoor lighting
+    'interior',     # Indoor lighting
+    f'{OLAT_ROOT}/all_white.hdr',
 ]
 
+for i in range(346):
+    ENVIRONMENT_MAPS.append(f'{OLAT_ROOT}/olat_{i}.hdr')
+
+for i in range(6):
+    ENVIRONMENT_MAPS.append(f'{OLAT_DEBUG_ROOT}/light_{i:03d}.hdr')
+    
 # Render Settings (Optimized for Speed)
 RENDER_SETTINGS = {
-    'frames': 60,  # Reduced from 120 to 60 for 2x speed
-    'resolution_x': 1280,  # Reduced from 1920 to 1280
-    'resolution_y': 720   # Reduced from 1080 to 720
+    'frames': 1,  # Reduced from 120 to 60 for 2x speed
+    'resolution_x': 800,  # Reduced from 1920 to 1280
+    'resolution_y': 800   # Reduced from 1080 to 720
 }
 
 # Camera and Framing Settings
 CAMERA_SETTINGS = {
     'fov': 60,  # Field of view in degrees (wider for better object fitting)
-    'margin_factor': 1.25,  # Margin around object (1.0 = tight fit, 1.2 = more space)
+    'margin_factor': 0.5,  # Margin around object (1.0 = tight fit, 1.2 = more space), useless
     'camera_angle': 75,  # Camera angle in degrees
     'auto_adjust_distance': True,  # Automatically adjust camera distance
     'target_object_size': 1.2  # Target size for object scaling (smaller for more space)
@@ -124,7 +150,7 @@ OUTPUT_SETTINGS = {
 # Grid Composition Settings
 GRID_SETTINGS = {
     'max_objects': 25,  # Maximum objects to process for grid
-    'grid_resolution': (1920, 1080),  # Output resolution for grid
+    'grid_resolution': (1080, 1920),  # Output resolution for grid
     'create_grids': True,  # Enable grid creation
     'create_concatenated': True,  # Enable concatenated videos
     'lighting_transition_duration': 2.0,  # Duration for each lighting environment (seconds)
@@ -358,7 +384,7 @@ def setup_camera_and_lighting(target_object, hdr_path):
     
     # Adjust camera view
     camera.data.type = 'PERSP'
-    camera.data.lens = 50
+    camera.data.lens = 75
     camera.data.clip_start = 0.1
     camera.data.clip_end = 1000.0
     
@@ -376,9 +402,9 @@ def setup_camera_and_lighting(target_object, hdr_path):
     camera.rotation_euler = (math.radians(CAMERA_SETTINGS['camera_angle']), 0, 0)
     
     # Additional camera adjustments for better framing
-    camera.data.lens = 50  # Standard lens for better object framing #35 is wider lens
-    camera.data.clip_start = 0.01  # Closer clip start
-    camera.data.clip_end = 1000.0
+    # camera.data.lens = 50  # Standard lens for better object framing #35 is wider lens
+    # camera.data.clip_start = 0.01  # Closer clip start
+    # camera.data.clip_end = 1000.0
     
     # Ensure object is perfectly centered by checking its location
     if target_object.location.length > 0.01:  # If object is not at origin
@@ -401,7 +427,7 @@ def setup_camera_and_lighting(target_object, hdr_path):
             return
         
         # Recalculate optimal distance with more generous margin to prevent cutoff
-        new_radius, new_height = calculate_optimal_camera_distance(all_bbox, margin_factor=1.15)
+        new_radius, new_height = calculate_optimal_camera_distance(all_bbox)
         
         # Update camera position
         camera.location = (0, -new_radius, new_height)
@@ -481,9 +507,26 @@ def setup_camera_and_lighting(target_object, hdr_path):
         # Add background shader
         background = world_nodes.new('ShaderNodeBackground')
         background.location = (0, 0)
-        background.inputs['Strength'].default_value = 1.0
-        
+        if 'olat_' in hdr_path:
+            background.inputs['Strength'].default_value = 10.0
+        elif 'light_' in hdr_path:
+            background.inputs['Strength'].default_value = 1.0
+        else:
+            background.inputs['Strength'].default_value = 1.0 
+            
+
+        # Add Mapping and Texture Coordinate nodes
+        tex_coord = world_nodes.new('ShaderNodeTexCoord')
+        tex_coord.location = (-800, 0)
+
+        mapping = world_nodes.new('ShaderNodeMapping')
+        mapping.location = (-400, 0)
+        mapping.inputs['Rotation'].default_value[2] = math.radians(90)  # Rotate 90° around Z-axis to cancel the default orientation
+
+
         # Connect nodes
+        world_links.new(tex_coord.outputs['Generated'], mapping.inputs['Vector'])
+        world_links.new(mapping.outputs['Vector'], env_tex.inputs['Vector'])
         world_links.new(env_tex.outputs['Color'], background.inputs['Color'])
         world_links.new(background.outputs['Background'], world_output.inputs['Surface'])
         
@@ -522,7 +565,6 @@ def setup_camera_and_lighting(target_object, hdr_path):
     print(f"Target object location: {target_object.location}")
     print(f"Object size: {bbox['size'] if bbox else 'unknown'}")
 
-#def setup_render_settings(output_path, resolution_x, resolution_y):
 def setup_render_settings(output_path, resolution_x, resolution_y, render_normal_maps=True):
     """Setup render settings for high quality output"""
     scene = bpy.context.scene
@@ -538,7 +580,7 @@ def setup_render_settings(output_path, resolution_x, resolution_y, render_normal
     ## Use Cycles render engine
     #scene.render.engine = 'CYCLES'
     # Use Eevee render engine for faster rendering
-    scene.render.engine = 'BLENDER_EEVEE'
+    scene.render.engine = 'BLENDER_EEVEE' # not support multigpu
     
     # # GPU rendering
     # scene.cycles.device = 'GPU'
@@ -724,68 +766,86 @@ def create_video_grid(video_paths, output_path, grid_width, grid_height, target_
     cell_width = target_resolution[0] // grid_width
     cell_height = target_resolution[1] // grid_height
     
-    # Build FFMPEG command for grid composition
-    input_videos = ""
-    filter_complex = f"nullsrc=size={target_resolution[0]}x{target_resolution[1]} [base];"
-    overlay_chain = ""
-    
-    for i, video_path in enumerate(video_paths):
-        if i >= grid_width * grid_height:
-            break  # Limit to grid size
-        
-        # Calculate position in grid
-        col = i % grid_width
-        row = i // grid_width
-        x_pos = col * cell_width
-        y_pos = row * cell_height
-        
-        # Add input
-        input_videos += f" -i \"{video_path}\""
-        
-        # Add scaling and positioning
-        filter_complex += f"[{i}:v] setpts=PTS-STARTPTS, scale={cell_width}x{cell_height} [video{i}];"
-        
-        # Add overlay
-        if i == 0:
-            overlay_chain += f"[base][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
-        elif i < len(video_paths) - 1 and i < grid_width * grid_height - 1:
-            overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
+    print(video_paths)
+    object_videos = []
+    for video_path in video_paths:
+        if os.path.exists(video_path):
+            video_np = imageio.mimread(video_path)
+            video_np = np.stack(video_np)
+            object_videos.append(video_np)
         else:
-            overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos}"
+            print(f"⚠️ Video file not found, skipping: {video_path}")
+    # object_videos = np.concatenate(object_videos, axis=0)
+
+    mosaic_video = make_mosaic(object_videos, size=target_resolution, pad_value=0)
+    imageio.mimwrite(output_path, mosaic_video, fps=30)
+    print(f"✅ Grid video created successfully: {output_path}")
+    return True
+        
     
-    # Complete FFMPEG command
-    cmd = f'ffmpeg{input_videos} -filter_complex "{filter_complex}{overlay_chain}" -c:v libx264 -preset fast -crf 23 -y "{output_path}"'
+    # # Build FFMPEG command for grid composition
+    # input_videos = ""
+    # filter_complex = f"nullsrc=size={target_resolution[0]}x{target_resolution[1]} [base];"
+    # overlay_chain = ""
     
-    print(f"🎬 Creating grid video: {grid_width}x{grid_height}")
-    print(f"📁 Output: {output_path}")
+    # for i, video_path in enumerate(video_paths):
+    #     if i >= grid_width * grid_height:
+    #         break  # Limit to grid size
+        
+    #     # Calculate position in grid
+    #     col = i % grid_width
+    #     row = i // grid_width
+    #     x_pos = col * cell_width
+    #     y_pos = row * cell_height
+        
+    #     # Add input
+    #     input_videos += f" -i \"{video_path}\""
+        
+    #     # Add scaling and positioning
+    #     filter_complex += f"[{i}:v] setpts=PTS-STARTPTS, scale={cell_width}x{cell_height} [video{i}];"
+        
+    #     # Add overlay
+    #     if i == 0:
+    #         overlay_chain += f"[base][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
+    #     elif i < len(video_paths) - 1 and i < grid_width * grid_height - 1:
+    #         overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
+    #     else:
+    #         overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos}"
     
-    try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"✅ Grid video created successfully: {output_path}")
-            return True
-        else:
-            print(f"❌ FFMPEG failed: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"❌ Error creating grid video: {e}")
-        return False
+    # # Complete FFMPEG command
+    # cmd = f'ffmpeg{input_videos} -filter_complex "{filter_complex}{overlay_chain}" -c:v libx264 -preset fast -crf 23 -y "{output_path}"'
+    
+    # print(f"🎬 Creating grid video: {grid_width}x{grid_height}")
+    # print(f"📁 Output: {output_path}")
+    
+    # try:
+    #     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    #     if result.returncode == 0:
+    #         print(f"✅ Grid video created successfully: {output_path}")
+    #         return True
+    #     else:
+    #         print(f"❌ FFMPEG failed: {result.stderr}")
+    #         return False
+    # except Exception as e:
+    #     print(f"❌ Error creating grid video: {e}")
+    #     return False
 
 
 def create_lighting_transition_grid(rendered_models, output_root, transition_duration=2.0):
-    """Create grid composition with lighting transition (all 8 lighting conditions)"""
+    """Create grid composition with lighting transition (city -> night)"""
     print("\n🎬 Creating Lighting Transition Grid Compositions")
     print("=" * 60)
     
     # Group videos by object name
     object_videos = {}
     for model_info in rendered_models:
+        
         file_name = os.path.splitext(os.path.basename(model_info['file']))[0]
         object_videos[file_name] = {}
         
         for envmap in model_info['rendered_envmaps']:
             # Check in model_videos directory first
-            video_path = os.path.join(output_root, "model_videos", f"{file_name}_{envmap}.mp4")
+            video_path = os.path.join(output_root, "model_videos", f"{file_name}/{envmap}.mp4")
             if os.path.exists(video_path):
                 object_videos[file_name][envmap] = video_path
             else:
@@ -808,7 +868,7 @@ def create_lighting_transition_grid(rendered_models, output_root, transition_dur
     print(f"📊 Found {len(partial_objects)} objects with only one lighting environment")
     
     if len(complete_objects) == 0:
-        print("❌ No objects found with both lighting environments")
+        print("⚠️ No objects found with both lighting environments")
         print("💡 Creating lighting transition with available objects...")
         # Use objects with at least one lighting environment
         if len(partial_objects) > 0:
@@ -817,7 +877,7 @@ def create_lighting_transition_grid(rendered_models, output_root, transition_dur
             return
     
     # Create compositions directory
-    compositions_dir = os.path.join(output_root, "compositions")
+    compositions_dir = os.path.join(output_root, "compositions", "mosaics")
     os.makedirs(compositions_dir, exist_ok=True)
     
     # Limit to max objects for grid
@@ -850,213 +910,76 @@ def create_lighting_transition_grid(rendered_models, output_root, transition_dur
             print(f"✅ 3x3 lighting transition grid created: {grid_3x3_output}")
     
     print(f"\n🎬 Lighting transition compositions saved to: {compositions_dir}")
+    
 
-def create_comprehensive_transition_videos(rendered_models, output_root, transition_duration=2.0):
-    """Create comprehensive transition videos: 8 lighting conditions + 4 material maps"""
-    print("\n🎬 Creating Comprehensive Transition Videos")
-    print("=" * 60)
-    print("📋 Features:")
-    print("   • 8 Lighting conditions: city, night, studio, sunset, sunrise, forest, courtyard, interior")
-    print("   • 4 Material maps: normal, albedo, specular, metallic")
-    print("   • Grid compositions with smooth transitions")
-    print("=" * 60)
+def make_mosaic(videos, grid=None, size=None, pad_value=0):
+    """
+    Create a mosaic video from a list of videos (each: (T, H, W, 3), dtype uint8/float).
     
-    # Create compositions directory
-    compositions_dir = os.path.join(output_root, "compositions")
-    os.makedirs(compositions_dir, exist_ok=True)
-    
-    # Get all available lighting environments
-    available_lightings = ['city', 'night', 'studio', 'sunset', 'sunrise', 'forest', 'courtyard', 'interior']
-    
-    # Group videos by object name
-    object_videos = {}
-    for model_info in rendered_models:
-        file_name = os.path.splitext(os.path.basename(model_info['file']))[0]
-        object_videos[file_name] = {}
-        
-        for envmap in model_info['rendered_envmaps']:
-            # Check in model_videos directory first
-            video_path = os.path.join(output_root, "model_videos", f"{file_name}_{envmap}.mp4")
-            if os.path.exists(video_path):
-                object_videos[file_name][envmap] = video_path
-            else:
-                # Fallback to old location
-                video_path = os.path.join(output_root, f"{file_name}_{envmap}.mp4")
-                if os.path.exists(video_path):
-                    object_videos[file_name][envmap] = video_path
-    
-    # Filter objects that have multiple lighting environments
-    complete_objects = {}
-    for obj_name, envmaps in object_videos.items():
-        if len(envmaps) >= 4:  # Need at least 4 lighting conditions
-            complete_objects[obj_name] = envmaps
-    
-    print(f"📊 Found {len(complete_objects)} objects with multiple lighting environments")
-    
-    if len(complete_objects) == 0:
-        print("❌ No objects found with sufficient lighting environments")
-        return
-    
-    # Create lighting transition videos for each object
-    for obj_name, envmaps in complete_objects.items():
-        print(f"\n🎬 Creating comprehensive transition for: {obj_name}")
-        
-        # Create lighting transition sequence
-        lighting_sequence = []
-        for lighting in available_lightings:
-            if lighting in envmaps:
-                lighting_sequence.append(envmaps[lighting])
-        
-        if len(lighting_sequence) >= 2:
-            # Create lighting transition video
-            lighting_output = os.path.join(compositions_dir, f"{obj_name}_lighting_transition_8envs.mp4")
-            create_lighting_sequence_video(lighting_sequence, lighting_output, transition_duration)
-        
-        # Create material map transition videos
-        create_material_map_transitions(obj_name, output_root, compositions_dir, transition_duration)
-    
-    # Create grid compositions
-    create_lighting_grid_compositions(complete_objects, compositions_dir, transition_duration)
-    
-    print(f"\n✅ Comprehensive transition videos created in: {compositions_dir}")
+    Args:
+        videos: list of np.ndarray, each shaped (T, H, W, 3)
+        grid: (rows, cols). If None, chosen automatically ~sqrt(len(videos))
+        size: (H, W) to resize frames to (nearest-neighbor). If None, uses first video's (H,W).
+        pad_value: value for empty grid cells if grid bigger than number of videos (e.g., 0=black)
+    Returns:
+        mosaic: np.ndarray shaped (T_out, rows*H, cols*W, 3)
+    """
+    assert len(videos) > 0, "No videos provided."
+    # Determine grid
+    n = len(videos)
+    if grid is None:
+        rows = int(math.floor(math.sqrt(n)))
+        cols = int(math.ceil(n / rows))
+    else:
+        rows, cols = grid
+        assert rows*cols >= n, "grid too small for number of videos"
 
-def create_lighting_sequence_video(video_paths, output_path, transition_duration=2.0):
-    """Create a smooth transition video from a sequence of videos"""
-    if len(video_paths) < 2:
-        print(f"⚠️  Need at least 2 videos for transition, found {len(video_paths)}")
-        return False
-    
-    print(f"🎬 Creating lighting sequence: {len(video_paths)} environments")
-    print(f"📁 Output: {output_path}")
-    
-    # Create concat file for FFmpeg
-    concat_file = output_path.replace('.mp4', '_concat.txt')
-    
-    try:
-        with open(concat_file, 'w') as f:
-            for video_path in video_paths:
-                f.write(f"file '{video_path}'\n")
-                f.write(f"duration {transition_duration}\n")
-        
-        # Use FFmpeg to create the transition video with crossfade
-        cmd = [
-            'ffmpeg',
-            '-y',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', concat_file,
-            '-filter_complex', f'[0:v]xfade=transition=fade:duration=0.5:offset={transition_duration-0.5}[v]',
-            '-map', '[v]',
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '23',
-            output_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print(f"✅ Created lighting sequence: {output_path}")
-        else:
-            print(f"❌ Failed to create lighting sequence: {result.stderr}")
-            return False
-        
-        # Clean up concat file
-        os.remove(concat_file)
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error creating lighting sequence: {e}")
-        return False
+    # Normalize sizes
+    if size is None:
+        _, base_h, base_w, _ = videos[0].shape
+    else:
+        base_h, base_w = size
 
-def create_material_map_transitions(obj_name, output_root, compositions_dir, transition_duration=2.0):
-    """Create material map transition videos for a specific object"""
-    print(f"🎨 Creating material map transitions for: {obj_name}")
-    
-    # Material map directories
-    material_dirs = {
-        'normal': os.path.join(output_root, "normal_map_videos"),
-        'albedo': os.path.join(output_root, "albedo_videos"),
-        'specular': os.path.join(output_root, "specular_videos"),
-        'metallic': os.path.join(output_root, "metallic_videos")
-    }
-    
-    # Find videos for each material map
-    material_videos = {}
-    for map_type, dir_path in material_dirs.items():
-        if os.path.exists(dir_path):
-            videos = [f for f in os.listdir(dir_path) if f.startswith(obj_name) and f.endswith('.mp4')]
-            if videos:
-                material_videos[map_type] = os.path.join(dir_path, videos[0])
-    
-    if len(material_videos) >= 2:
-        # Create material map transition video
-        material_output = os.path.join(compositions_dir, f"{obj_name}_material_maps_transition.mp4")
-        create_material_sequence_video(material_videos, material_output, transition_duration)
+    def _resize_nn(frames, out_h, out_w):
+        # frames: (T, H, W, C) -> simple nearest-neighbor resize using numpy indexing (no cv2 needed)
+        T, H, W, C = frames.shape
+        if (H, W) == (out_h, out_w):
+            return frames
+        y_idx = (np.linspace(0, H - 1, out_h)).astype(int)
+        x_idx = (np.linspace(0, W - 1, out_w)).astype(int)
+        return frames[:, y_idx][:, :, x_idx]
 
-def create_material_sequence_video(material_videos, output_path, transition_duration=2.0):
-    """Create a transition video between different material maps"""
-    if len(material_videos) < 2:
-        return False
-    
-    print(f"🎨 Creating material map sequence: {list(material_videos.keys())}")
-    
-    # Create concat file for FFmpeg
-    concat_file = output_path.replace('.mp4', '_concat.txt')
-    
-    try:
-        with open(concat_file, 'w') as f:
-            for map_type, video_path in material_videos.items():
-                f.write(f"file '{video_path}'\n")
-                f.write(f"duration {transition_duration}\n")
-        
-        # Use FFmpeg to create the transition video
-        cmd = [
-            'ffmpeg',
-            '-y',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', concat_file,
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '23',
-            output_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print(f"✅ Created material map sequence: {output_path}")
-        else:
-            print(f"❌ Failed to create material map sequence: {result.stderr}")
-            return False
-        
-        # Clean up concat file
-        os.remove(concat_file)
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error creating material map sequence: {e}")
-        return False
+    # Make all videos same length (pad with last frame) and same spatial size
+    max_T = max(v.shape[0] for v in videos)
+    processed = []
+    for v in videos:
+        T, H, W, C = v.shape
+        v_resized = _resize_nn(v, base_h, base_w)
+        if T < max_T:
+            last = v_resized[-1:]
+            pad = np.repeat(last, max_T - T, axis=0)
+            v_resized = np.concatenate([v_resized, pad], axis=0)
+        processed.append(v_resized)
 
-def create_lighting_grid_compositions(complete_objects, compositions_dir, transition_duration=2.0):
-    """Create grid compositions showing all lighting conditions"""
-    print(f"\n🎬 Creating lighting grid compositions...")
-    
-    # Create grids for different sizes
-    grid_sizes = [
-        (3, 3, 9),   # 3x3 grid for 9 objects
-        (4, 4, 16),  # 4x4 grid for 16 objects
-        (5, 4, 20)   # 5x4 grid for 20 objects
-    ]
-    
-    for grid_width, grid_height, max_objects in grid_sizes:
-        if len(complete_objects) >= max_objects:
-            selected_objects = list(complete_objects.items())[:max_objects]
-            grid_output = os.path.join(compositions_dir, f"lighting_grid_{grid_width}x{grid_height}_{max_objects}objects.mp4")
-            
-            if create_lighting_transition_grid_video(selected_objects, grid_output, grid_width, grid_height, transition_duration):
-                print(f"✅ Created {grid_width}x{grid_height} lighting grid: {grid_output}")
+    # If grid has extra slots, fill with constant frames
+    empty_slots = rows * cols - n
+    if empty_slots > 0:
+        filler = np.full((max_T, base_h, base_w, 3), pad_value, dtype=processed[0].dtype)
+        processed.extend([filler] * empty_slots)
+
+    # Stack into grid
+    # processed order: row-major fill
+    grid_rows = []
+    idx = 0
+    for r in range(rows):
+        row_videos = processed[idx:idx+cols]
+        idx += cols
+        row = np.concatenate(row_videos, axis=2)  # concat width
+        grid_rows.append(row)
+    mosaic = np.concatenate(grid_rows, axis=1)     # concat height
+
+    # mosaic shape: (T, rows*H, cols*W, 3)
+    return mosaic
 
 def create_lighting_transition_grid_video(selected_objects, output_path, grid_width, grid_height, transition_duration=2.0):
     """Create a grid video with lighting transition from city to night using simpler approach"""
@@ -1077,126 +1000,140 @@ def create_lighting_transition_grid_video(selected_objects, output_path, grid_wi
     print(f"📁 Output: {output_path}")
     print(f"⏱️  Duration: {transition_duration * 2} seconds (2s city + 2s night)")
     
+    # concate videos for each object
+    object_videos = []
+    for obj_name, envmaps in selected_objects:
+        video_envmaps = []
+        for env, env_video_path in envmaps.items():
+            video_envmaps.append(imageio.mimread(env_video_path))
+        video_envmaps = np.concatenate(video_envmaps, axis=0)
+        object_videos.append(video_envmaps)
+    
+    # put videos into grid
+    mosaic_video = make_mosaic(object_videos, size=target_resolution, pad_value=0)
+    imageio.mimwrite(output_path, mosaic_video, fps=30)
+    print(f"✅ Lighting transition grid created successfully: {output_path}")
+    
     # Create temporary files for city and night grids
-    temp_city_grid = output_path.replace('.mp4', '_city_temp.mp4')
-    temp_night_grid = output_path.replace('.mp4', '_night_temp.mp4')
+    # temp_city_grid = output_path.replace('.mp4', '_city_temp.mp4')
+    # temp_night_grid = output_path.replace('.mp4', '_night_temp.mp4')
     
     # Step 1: Create city grid (first 2 seconds)
-    city_videos = []
-    for i, (obj_name, envmaps) in enumerate(selected_objects):
-        if i >= grid_width * grid_height:
-            break
+    # city_videos = []
+    # for i, (obj_name, envmaps) in enumerate(selected_objects):
+    #     if i >= grid_width * grid_height:
+    #         break
         
-        # Get city video (or fallback to night if city not available)
-        if 'city' in envmaps:
-            city_video = envmaps['city']
-        elif 'night' in envmaps:
-            city_video = envmaps['night']  # Fallback
-        else:
-            continue  # Skip if no video available
+    #     # Get city video (or fallback to night if city not available)
+    #     if 'city' in envmaps:
+    #         city_video = envmaps['city']
+    #     elif 'night' in envmaps:
+    #         city_video = envmaps['night']  # Fallback
+    #     else:
+    #         continue  # Skip if no video available
         
-        city_videos.append(city_video)
+    #     city_videos.append(city_video)
     
-    if city_videos:
-        # Create city grid using simple approach
-        if create_simple_grid(city_videos, temp_city_grid, grid_width, grid_height, target_resolution, transition_duration):
-            print(f"✅ Created city grid: {temp_city_grid}")
-        else:
-            print(f"❌ Failed to create city grid")
-            return False
+    # if city_videos:
+    #     # Create city grid using simple approach
+    #     if create_simple_grid(city_videos, temp_city_grid, grid_width, grid_height, target_resolution, transition_duration):
+    #         print(f"✅ Created city grid: {temp_city_grid}")
+    #     else:
+    #         print(f"❌ Failed to create city grid")
+    #         return False
     
-    # Step 2: Create night grid (second 2 seconds)
-    night_videos = []
-    for i, (obj_name, envmaps) in enumerate(selected_objects):
-        if i >= grid_width * grid_height:
-            break
+    # # Step 2: Create night grid (second 2 seconds)
+    # night_videos = []
+    # for i, (obj_name, envmaps) in enumerate(selected_objects):
+    #     if i >= grid_width * grid_height:
+    #         break
         
-        # Get night video (or fallback to city if night not available)
-        if 'night' in envmaps:
-            night_video = envmaps['night']
-        elif 'city' in envmaps:
-            night_video = envmaps['city']  # Fallback
-        else:
-            continue  # Skip if no video available
+    #     # Get night video (or fallback to city if night not available)
+    #     if 'night' in envmaps:
+    #         night_video = envmaps['night']
+    #     elif 'city' in envmaps:
+    #         night_video = envmaps['city']  # Fallback
+    #     else:
+    #         continue  # Skip if no video available
         
-        night_videos.append(night_video)
+    #     night_videos.append(night_video)
     
-    if night_videos:
-        # Create night grid using simple approach
-        if create_simple_grid(night_videos, temp_night_grid, grid_width, grid_height, target_resolution, transition_duration):
-            print(f"✅ Created night grid: {temp_night_grid}")
-        else:
-            print(f"❌ Failed to create night grid")
-            return False
+    # if night_videos:
+    #     # Create night grid using simple approach
+    #     if create_simple_grid(night_videos, temp_night_grid, grid_width, grid_height, target_resolution, transition_duration):
+    #         print(f"✅ Created night grid: {temp_night_grid}")
+    #     else:
+    #         print(f"❌ Failed to create night grid")
+    #         return False
     
-    # Step 3: Concatenate the two grids
-    try:
-        cmd = f'ffmpeg -i "{temp_city_grid}" -i "{temp_night_grid}" -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0" -c:v libx264 -preset fast -crf 23 -y "{output_path}"'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    # # Step 3: Concatenate the two grids
+    # try:
+    #     cmd = f'ffmpeg -i "{temp_city_grid}" -i "{temp_night_grid}" -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0" -c:v libx264 -preset fast -crf 23 -y "{output_path}"'
+    #     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
-        if result.returncode == 0:
-            print(f"✅ Lighting transition grid created successfully: {output_path}")
-            # Clean up temp files
-            try:
-                os.remove(temp_city_grid)
-                os.remove(temp_night_grid)
-            except:
-                pass
-            return True
-        else:
-            print(f"❌ FFMPEG concatenation failed: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"❌ Error creating lighting transition grid: {e}")
-        return False
+    #     if result.returncode == 0:
+    #         print(f"✅ Lighting transition grid created successfully: {output_path}")
+    #         # Clean up temp files
+    #         try:
+    #             os.remove(temp_city_grid)
+    #             os.remove(temp_night_grid)
+    #         except:
+    #             pass
+    #         return True
+    #     else:
+    #         print(f"❌ FFMPEG concatenation failed: {result.stderr}")
+    #         return False
+    # except Exception as e:
+    #     print(f"❌ Error creating lighting transition grid: {e}")
+    #     return False
 
-def create_simple_grid(video_paths, output_path, grid_width, grid_height, target_resolution, duration=2.0):
-    """Create a simple grid from video paths"""
-    if not video_paths:
-        return False
+# def create_simple_grid(video_paths, output_path, grid_width, grid_height, target_resolution, duration=2.0):
+#     """Create a simple grid from video paths"""
+#     if not video_paths:
+#         return False
     
-    # Calculate individual video size
-    cell_width = target_resolution[0] // grid_width
-    cell_height = target_resolution[1] // grid_height
+#     # Calculate individual video size
+#     cell_width = target_resolution[0] // grid_width
+#     cell_height = target_resolution[1] // grid_height
     
-    # Build FFMPEG command for simple grid
-    input_videos = ""
-    filter_complex = f"nullsrc=size={target_resolution[0]}x{target_resolution[1]}:duration={duration} [base];"
-    overlay_chain = ""
+#     # Build FFMPEG command for simple grid
+#     input_videos = ""
+#     filter_complex = f"nullsrc=size={target_resolution[0]}x{target_resolution[1]}:duration={duration} [base];"
+#     overlay_chain = ""
     
-    for i, video_path in enumerate(video_paths):
-        if i >= grid_width * grid_height or video_path is None:
-            break
+#     for i, video_path in enumerate(video_paths):
+#         if i >= grid_width * grid_height or video_path is None:
+#             break
         
-        # Calculate position in grid
-        col = i % grid_width
-        row = i // grid_width
-        x_pos = col * cell_width
-        y_pos = row * cell_height
+#         # Calculate position in grid
+#         col = i % grid_width
+#         row = i // grid_width
+#         x_pos = col * cell_width
+#         y_pos = row * cell_height
         
-        # Add input
-        input_videos += f" -i \"{video_path}\""
+#         # Add input
+#         input_videos += f" -i \"{video_path}\""
         
-        # Add scaling and positioning
-        filter_complex += f"[{i}:v] setpts=PTS-STARTPTS, scale={cell_width}x{cell_height}, trim=duration={duration} [video{i}];"
+#         # Add scaling and positioning
+#         filter_complex += f"[{i}:v] setpts=PTS-STARTPTS, scale={cell_width}x{cell_height}, trim=duration={duration} [video{i}];"
         
-        # Add overlay
-        if i == 0:
-            overlay_chain += f"[base][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
-        elif i < len(video_paths) - 1 and i < grid_width * grid_height - 1:
-            overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
-        else:
-            overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos}"
+#         # Add overlay
+#         if i == 0:
+#             overlay_chain += f"[base][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
+#         elif i < len(video_paths) - 1 and i < grid_width * grid_height - 1:
+#             overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos} [tmp{i}];"
+#         else:
+#             overlay_chain += f"[tmp{i-1}][video{i}] overlay=shortest=1:x={x_pos}:y={y_pos}"
     
-    # Complete FFMPEG command
-    cmd = f'ffmpeg{input_videos} -filter_complex "{filter_complex}{overlay_chain}" -c:v libx264 -preset fast -crf 23 -y "{output_path}"'
+#     # Complete FFMPEG command
+#     cmd = f'ffmpeg{input_videos} -filter_complex "{filter_complex}{overlay_chain}" -c:v libx264 -preset fast -crf 23 -y "{output_path}"'
     
-    try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        return result.returncode == 0
-    except Exception as e:
-        print(f"❌ Error creating simple grid: {e}")
-        return False
+#     try:
+#         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+#         return result.returncode == 0
+#     except Exception as e:
+#         print(f"❌ Error creating simple grid: {e}")
+#         return False
 
 def create_video_compositions(rendered_models, output_root):
     """Create grid compositions with lighting transitions"""
@@ -1219,7 +1156,7 @@ def create_video_compositions(rendered_models, output_root):
         file_name = os.path.splitext(os.path.basename(model_info['file']))[0]
         for envmap in model_info['rendered_envmaps']:
             # Check in model_videos directory first
-            video_path = os.path.join(output_root, "model_videos", f"{file_name}_{envmap}.mp4")
+            video_path = os.path.join(output_root, "model_videos", f"{file_name}/{envmap}.mp4")
             if os.path.exists(video_path):
                 all_videos.append({
                     'path': video_path,
@@ -1228,7 +1165,7 @@ def create_video_compositions(rendered_models, output_root):
                 })
             else:
                 # Fallback to old location
-                video_path = os.path.join(output_root, f"{file_name}_{envmap}.mp4")
+                video_path = os.path.join(output_root, f"{file_name}/{envmap}.mp4")
                 if os.path.exists(video_path):
                     all_videos.append({
                         'path': video_path,
@@ -1243,29 +1180,29 @@ def create_video_compositions(rendered_models, output_root):
         return
     
     # Create compositions directory
-    compositions_dir = os.path.join(output_root, "compositions")
+    compositions_dir = os.path.join(output_root, "compositions", "mosaics")
     os.makedirs(compositions_dir, exist_ok=True)
     
     # Create traditional grid videos (optional)
-    if GRID_SETTINGS['create_grids']:
-        print("\n🎬 Creating Traditional Grid Videos...")
+    # if GRID_SETTINGS['create_grids']:
+    #     print("\n🎬 Creating Traditional Grid Videos...")
         
-        # Limit to max objects
-        max_videos = min(len(all_videos), GRID_SETTINGS['max_objects'])
-        selected_videos = all_videos[:max_videos]
+    #     # Limit to max objects
+    #     max_videos = min(len(all_videos), GRID_SETTINGS['max_objects'])
+    #     selected_videos = all_videos[:max_videos]
         
-        # Calculate grid dimensions
-        cols, rows = calculate_grid_dimensions(len(selected_videos))
-        print(f"📐 Grid dimensions: {cols}x{rows} for {len(selected_videos)} videos")
+    #     # Calculate grid dimensions
+    #     cols, rows = calculate_grid_dimensions(len(selected_videos))
+    #     print(f"📐 Grid dimensions: {cols}x{rows} for {len(selected_videos)} videos")
         
-        # Create grid video
-        video_paths = [v['path'] for v in selected_videos]
-        grid_output = os.path.join(compositions_dir, f"traditional_grid_{cols}x{rows}_{len(selected_videos)}videos.mp4")
+    #     # Create grid video
+    #     video_paths = [v['path'] for v in selected_videos]
+    #     grid_output = os.path.join(compositions_dir, f"traditional_grid_{cols}x{rows}_{len(selected_videos)}videos.mp4")
         
-        if create_video_grid(video_paths, grid_output, cols, rows, GRID_SETTINGS['grid_resolution']):
-            print(f"✅ Traditional grid video created: {grid_output}")
+    #     if create_video_grid(video_paths, grid_output, cols, rows, GRID_SETTINGS['grid_resolution']):
+    #         print(f"✅ Traditional grid video created: {grid_output}")
     
-    print(f"\n🎬 All video compositions saved to: {compositions_dir}")
+    # print(f"\n🎬 All video compositions saved to: {compositions_dir}")
     
     # Create grid compositions for normal and albedo maps
     create_map_type_grids(rendered_models, output_root)
@@ -1276,36 +1213,90 @@ def create_map_type_grids(rendered_models, output_root):
     print("=" * 50)
     
     # Create compositions directory
-    compositions_dir = os.path.join(output_root, "compositions")
+    compositions_dir = os.path.join(output_root, "compositions", "mosaics")
     os.makedirs(compositions_dir, exist_ok=True)
     
     # Collect normal map videos
     normal_videos = []
     normal_videos_dir = os.path.join(output_root, "normal_map_videos")
     if os.path.exists(normal_videos_dir):
-        for file in os.listdir(normal_videos_dir):
+        for file in sorted(os.listdir(normal_videos_dir)):
             if file.endswith('.mp4'):
                 normal_videos.append({
                     'path': os.path.join(normal_videos_dir, file),
                     'name': file.replace('.mp4', ''),
                     'type': 'normal'
                 })
+        # for rendered_model in rendered_models:
+        #     file_name = os.path.splitext(os.path.basename(rendered_model['file']))[0]
+        #     normal_video_path = os.path.join(normal_videos_dir, f"{file_name}.mp4")
+        #     if os.path.exists(normal_video_path):
+        #         normal_videos.append({
+        #             'path': normal_video_path,
+        #             'name': file_name,
+        #             'type': 'normal'
+        #         })
     
     # Collect albedo map videos
     albedo_videos = []
     albedo_videos_dir = os.path.join(output_root, "albedo_videos")
     if os.path.exists(albedo_videos_dir):
-        for file in os.listdir(albedo_videos_dir):
+        for file in sorted(os.listdir(albedo_videos_dir)):
             if file.endswith('.mp4'):
                 albedo_videos.append({
                     'path': os.path.join(albedo_videos_dir, file),
                     'name': file.replace('.mp4', ''),
                     'type': 'albedo'
                 })
+        # for rendered_model in rendered_models:
+        #     file_name = os.path.splitext(os.path.basename(rendered_model['file']))[0]
+        #     albedo_video_path = os.path.join(albedo_videos_dir, f"{file_name}.mp4")
+        #     if os.path.exists(albedo_video_path):
+        #         albedo_videos.append({
+        #             'path': albedo_video_path,
+        #             'name': file_name,
+        #             'type': 'albedo'
+        #         })
+        
+    specular_videos = []  # Currently not implemented
+    specular_videos_dir = os.path.join(output_root, "specular_videos")
+    if os.path.exists(specular_videos_dir):
+        for file in sorted(os.listdir(specular_videos_dir)):
+            if file.endswith('.mp4'):
+                specular_videos.append({
+                    'path': os.path.join(specular_videos_dir, file),
+                    'name': file.replace('.mp4', ''),
+                    'type': 'specular'
+                })
+                
+    metallic_videos = []
+    metallic_videos_dir = os.path.join(output_root, "metallic_videos")
+    if os.path.exists(metallic_videos_dir):
+        for file in sorted(os.listdir(metallic_videos_dir)):
+            if file.endswith('.mp4'):
+                metallic_videos.append({
+                    'path': os.path.join(metallic_videos_dir, file),
+                    'name': file.replace('.mp4', ''),
+                    'type': 'metallic'
+                })
+                
+    roughness_videos = []
+    roughness_videos_dir = os.path.join(output_root, "roughness_videos")
+    if os.path.exists(roughness_videos_dir):
+        for file in sorted(os.listdir(roughness_videos_dir)):
+            if file.endswith('.mp4'):
+                roughness_videos.append({
+                    'path': os.path.join(roughness_videos_dir, file),
+                    'name': file.replace('.mp4', ''),
+                    'type': 'roughness'
+                })
     
     print(f"📊 Found {len(normal_videos)} normal map videos")
     print(f"📊 Found {len(albedo_videos)} albedo map videos")
-    
+    print(f"📊 Found {len(specular_videos)} specular map videos")
+    print(f"📊 Found {len(metallic_videos)} metallic map videos")
+    print(f"📊 Found {len(roughness_videos)} roughness map videos")
+
     # Create normal map grid
     if len(normal_videos) > 0:
         max_videos = min(len(normal_videos), GRID_SETTINGS['max_objects'])
@@ -1333,6 +1324,45 @@ def create_map_type_grids(rendered_models, output_root):
         
         if create_video_grid(video_paths, albedo_grid_output, cols, rows, GRID_SETTINGS['grid_resolution']):
             print(f"✅ Albedo maps grid video created: {albedo_grid_output}")
+            
+    if len(specular_videos) > 0:
+        max_videos = min(len(specular_videos), GRID_SETTINGS['max_objects'])
+        selected_specular_videos = specular_videos[:max_videos]
+        
+        cols, rows = calculate_grid_dimensions(len(selected_specular_videos))
+        print(f"📐 Specular map grid dimensions: {cols}x{rows} for {len(selected_specular_videos)} videos")
+        
+        video_paths = [v['path'] for v in selected_specular_videos]
+        specular_grid_output = os.path.join(compositions_dir, f"specular_maps_grid_{cols}x{rows}_{len(selected_specular_videos)}videos.mp4")
+        
+        if create_video_grid(video_paths, specular_grid_output, cols, rows, GRID_SETTINGS['grid_resolution']):
+            print(f"✅ Specular maps grid video created: {specular_grid_output}")
+            
+    if len(metallic_videos) > 0:
+        max_videos = min(len(metallic_videos), GRID_SETTINGS['max_objects'])
+        selected_metallic_videos = metallic_videos[:max_videos]
+        
+        cols, rows = calculate_grid_dimensions(len(selected_metallic_videos))
+        print(f"📐 Metallic map grid dimensions: {cols}x{rows} for {len(selected_metallic_videos)} videos")
+        
+        video_paths = [v['path'] for v in selected_metallic_videos]
+        metallic_grid_output = os.path.join(compositions_dir, f"metallic_maps_grid_{cols}x{rows}_{len(selected_metallic_videos)}videos.mp4")
+        
+        if create_video_grid(video_paths, metallic_grid_output, cols, rows, GRID_SETTINGS['grid_resolution']):
+            print(f"✅ Metallic maps grid video created: {metallic_grid_output}")
+            
+    if len(roughness_videos) > 0:
+        max_videos = min(len(roughness_videos), GRID_SETTINGS['max_objects'])
+        selected_roughness_videos = roughness_videos[:max_videos]
+        
+        cols, rows = calculate_grid_dimensions(len(selected_roughness_videos))
+        print(f"📐 Roughness map grid dimensions: {cols}x{rows} for {len(selected_roughness_videos)} videos")
+        
+        video_paths = [v['path'] for v in selected_roughness_videos]
+        roughness_grid_output = os.path.join(compositions_dir, f"roughness_maps_grid_{cols}x{rows}_{len(selected_roughness_videos)}videos.mp4")
+        
+        if create_video_grid(video_paths, roughness_grid_output, cols, rows, GRID_SETTINGS['grid_resolution']):
+            print(f"✅ Roughness maps grid video created: {roughness_grid_output}")
     
     print(f"\n🎬 Map type grid compositions saved to: {compositions_dir}")
 
@@ -1377,7 +1407,7 @@ def render_normal_maps_with_eevee(mesh_objects, output_dir, envmap):
     # Add normal map output node
     normal_output = tree.nodes.new('CompositorNodeOutputFile')
     normal_output.location = (400, 0)
-    normal_output.base_path = os.path.join(output_dir, f"normal_{envmap}_")
+    normal_output.base_path = os.path.join(output_dir, f"normal")
     normal_output.format.file_format = OUTPUT_SETTINGS['normal_map_format']  # Use configurable format to preserve negative values
     
     # Connect normal pass to output
@@ -1391,9 +1421,12 @@ def render_normal_maps_with_eevee(mesh_objects, output_dir, envmap):
     print(f"🎬 Rendering {RENDER_SETTINGS['frames']} normal map frames with Eevee...")
     bpy.ops.render.render(animation=True)
     
+    # remove CompositorNodeOutputFile nodes to prevent conflicts in subsequent renders
+    tree.nodes.remove(normal_output)
+    
     print(f"✅ Eevee normal map rendering complete for {envmap}")
     format_ext = 'exr' if OUTPUT_SETTINGS['normal_map_format'] == 'OPEN_EXR' else 'png'
-    print(f"   Normal maps saved as: {os.path.join(output_dir, f'normal_{envmap}_*.{format_ext}')} ({OUTPUT_SETTINGS['normal_map_format']} format preserves negative values)")
+    print(f"   Normal maps saved as: {os.path.join(output_dir, f'normal_*.{format_ext}')} ({OUTPUT_SETTINGS['normal_map_format']} format preserves negative values)")
     
     # Check if normal maps are actually normal maps (not diffuse)
     check_normal_map_quality(output_dir, envmap)
@@ -1563,7 +1596,7 @@ def render_albedo_maps_with_eevee(mesh_objects, output_dir, envmap):
     # Add albedo map output node
     albedo_output = tree.nodes.new('CompositorNodeOutputFile')
     albedo_output.location = (400, 0)
-    albedo_output.base_path = os.path.join(output_dir, f"albedo_{envmap}_")
+    albedo_output.base_path = os.path.join(output_dir, f"albedo")
     albedo_output.format.file_format = OUTPUT_SETTINGS['other_maps_format']  # Use configurable format for better precision
     
     # Connect to regular image output
@@ -1577,9 +1610,12 @@ def render_albedo_maps_with_eevee(mesh_objects, output_dir, envmap):
     print(f"🎬 Rendering {RENDER_SETTINGS['frames']} albedo map frames with Eevee...")
     bpy.ops.render.render(animation=True)
     
+    # remove CompositorNodeOutputFile nodes to prevent conflicts in subsequent renders
+    tree.nodes.remove(albedo_output)
+    
     print(f"✅ Eevee albedo map rendering complete for {envmap}")
     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
-    print(f"   Albedo maps saved as: {os.path.join(output_dir, f'albedo_{envmap}_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
+    print(f"   Albedo maps saved as: {os.path.join(output_dir, f'albedo_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
     
     # Restore original materials
     for obj in mesh_objects:
@@ -1766,7 +1802,7 @@ def render_specular_maps_with_eevee(mesh_objects, output_dir, envmap):
     # Add specular map output node
     specular_output = tree.nodes.new('CompositorNodeOutputFile')
     specular_output.location = (400, 0)
-    specular_output.base_path = os.path.join(output_dir, f"specular_{envmap}_")
+    specular_output.base_path = os.path.join(output_dir, f"specular")
     specular_output.format.file_format = OUTPUT_SETTINGS['other_maps_format']  # Use configurable format for better precision
     
     # Connect to regular image output
@@ -1780,9 +1816,12 @@ def render_specular_maps_with_eevee(mesh_objects, output_dir, envmap):
     print(f"🎬 Rendering {RENDER_SETTINGS['frames']} specular map frames with Eevee...")
     bpy.ops.render.render(animation=True)
     
+    # remove CompositorNodeOutputFile nodes to prevent conflicts in subsequent renders
+    tree.nodes.remove(specular_output)
+    
     print(f"✅ Eevee specular map rendering complete for {envmap}")
     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
-    print(f"   Specular maps saved as: {os.path.join(output_dir, f'specular_{envmap}_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
+    print(f"   Specular maps saved as: {os.path.join(output_dir, f'specular_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
     
     # Restore original materials
     for obj in mesh_objects:
@@ -1918,7 +1957,7 @@ def render_metallic_maps_with_eevee(mesh_objects, output_dir, envmap):
     # Add metallic map output node
     metallic_output = tree.nodes.new('CompositorNodeOutputFile')
     metallic_output.location = (400, 0)
-    metallic_output.base_path = os.path.join(output_dir, f"metallic_{envmap}_")
+    metallic_output.base_path = os.path.join(output_dir, f"metallic")
     metallic_output.format.file_format = OUTPUT_SETTINGS['other_maps_format']  # Use configurable format for better precision
     
     # Connect to regular image output
@@ -1932,9 +1971,12 @@ def render_metallic_maps_with_eevee(mesh_objects, output_dir, envmap):
     print(f"🎬 Rendering {RENDER_SETTINGS['frames']} metallic map frames with Eevee...")
     bpy.ops.render.render(animation=True)
     
+    # remove CompositorNodeOutputFile nodes to prevent conflicts in subsequent renders
+    tree.nodes.remove(metallic_output)
+    
     print(f"✅ Eevee metallic map rendering complete for {envmap}")
     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
-    print(f"   Metallic maps saved as: {os.path.join(output_dir, f'metallic_{envmap}_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
+    print(f"   Metallic maps saved as: {os.path.join(output_dir, f'metallic_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
     
     # Restore original materials
     for obj in mesh_objects:
@@ -2004,19 +2046,15 @@ def render_roughness_maps_with_eevee(mesh_objects, output_dir, envmap):
                         copied_texture.location = (-200, 0)
                         copied_texture.image = roughness_texture.image
                         
-                        # For roughness, we need to invert the texture (rough = dark, smooth = bright)
-                        invert_node = roughness_mat.node_tree.nodes.new('ShaderNodeInvert')
-                        invert_node.location = (-100, 0)
                         
                         # Connect texture -> invert -> emission
-                        roughness_mat.node_tree.links.new(copied_texture.outputs['Color'], invert_node.inputs['Color'])
-                        roughness_mat.node_tree.links.new(invert_node.outputs['Color'], emission.inputs['Color'])
+                        roughness_mat.node_tree.links.new(copied_texture.outputs['Color'], emission.inputs['Color'])
                         emission.inputs['Strength'].default_value = 1.0
                         print(f"  🌫️ Copied and connected roughness texture (inverted) for {obj.name} material {i}: {roughness_texture.image.name}")
                     else:
                         # Convert roughness to grayscale color (0-1 range, inverted for visualization)
                         # Note: Roughness is inverted for visualization (rough = dark, smooth = bright)
-                        roughness_color = (1.0 - roughness_value, 1.0 - roughness_value, 1.0 - roughness_value, 1.0)
+                        roughness_color = (roughness_value, roughness_value, roughness_value, 1.0)
                         emission.inputs['Color'].default_value = roughness_color
                         emission.inputs['Strength'].default_value = 2.0  # Bright emission
                         print(f"  🌫️ Using roughness value (inverted) for {obj.name} material {i}: {roughness_value:.2f} -> {1.0-roughness_value:.2f}")
@@ -2076,7 +2114,7 @@ def render_roughness_maps_with_eevee(mesh_objects, output_dir, envmap):
     # Add roughness map output node
     roughness_output = tree.nodes.new('CompositorNodeOutputFile')
     roughness_output.location = (400, 0)
-    roughness_output.base_path = os.path.join(output_dir, f"roughness_{envmap}_")
+    roughness_output.base_path = os.path.join(output_dir, f"roughness")
     roughness_output.format.file_format = OUTPUT_SETTINGS['other_maps_format']  # Use configurable format for better precision
     
     # Connect to regular image output
@@ -2090,9 +2128,12 @@ def render_roughness_maps_with_eevee(mesh_objects, output_dir, envmap):
     print(f"🎬 Rendering {RENDER_SETTINGS['frames']} roughness map frames with Eevee...")
     bpy.ops.render.render(animation=True)
     
+    # remove CompositorNodeOutputFile nodes to prevent conflicts in subsequent renders
+    tree.nodes.remove(roughness_output)
+
     print(f"✅ Eevee roughness map rendering complete for {envmap}")
     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
-    print(f"   Roughness maps saved as: {os.path.join(output_dir, f'roughness_{envmap}_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
+    print(f"   Roughness maps saved as: {os.path.join(output_dir, f'roughness_*.{format_ext}')} ({OUTPUT_SETTINGS['other_maps_format']} format for better precision)")
     
     # Restore original materials
     for obj in mesh_objects:
@@ -2114,7 +2155,7 @@ def check_normal_map_quality(output_dir, envmap):
     import numpy as np
     
     # Find the normal map subdirectory
-    normal_subdir = os.path.join(output_dir, f"normal_{envmap}_")
+    normal_subdir = os.path.join(output_dir, f"normal")
     
     if not os.path.exists(normal_subdir):
         print(f"⚠️  No normal map directory found: {normal_subdir}")
@@ -2178,7 +2219,7 @@ def verify_negative_values_preserved(output_dir, envmap):
     import numpy as np
     
     # Find the normal map subdirectory
-    normal_subdir = os.path.join(output_dir, f"normal_{envmap}_")
+    normal_subdir = os.path.join(output_dir, f"normal")
     
     if not os.path.exists(normal_subdir):
         print(f"⚠️  No normal map directory found: {normal_subdir}")
@@ -2959,7 +3000,7 @@ def check_albedo_map_quality(output_dir, envmap):
     import numpy as np
     
     # Find the albedo map subdirectory
-    albedo_subdir = os.path.join(output_dir, f"albedo_{envmap}_")
+    albedo_subdir = os.path.join(output_dir, f"albedo")
     
     if not os.path.exists(albedo_subdir):
         print(f"⚠️  No albedo map directory found: {albedo_subdir}")
@@ -3075,34 +3116,22 @@ def process_single_model(model_path, output_root, envmaps):
     for envmap in envmaps:
         print(f"\n🎬 Rendering with {envmap} environment...")
         
+        if os.path.isfile(envmap): 
+            hdr_path = envmap
+            envmap = os.path.splitext(os.path.basename(envmap))[0]
+        else:
+            # Setup camera and lighting
+            hdr_path = os.path.join(BLENDER_ROOT, "3.6", "datafiles", "studiolights", "world", f"{envmap}.exr")
+            if not os.path.isfile(hdr_path):
+                raise FileNotFoundError(f"HDRI file not found: {hdr_path}")
+        
         # Setup output directory
-        output_dir = os.path.join(output_root, file_name, envmap)
+        output_dir = os.path.join(output_root, 'renderings', file_name, 'lighting', envmap)
+        gbuffer_dir = os.path.join(output_root, 'renderings', file_name, 'gbuffers')
+        video_dir = os.path.join(output_root, 'videos')
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Setup camera and lighting with fallback options
-        hdr_path = os.path.join(BLENDER_ROOT, "3.6", "datafiles", "studiolights", "world", f"{envmap}.exr")
-        
-        # Check custom HDR directory first (if it exists)
-        if not os.path.exists(hdr_path) and os.path.exists(CUSTOM_HDR_DIR):
-            custom_hdr_path = os.path.join(CUSTOM_HDR_DIR, f"{envmap}.exr")
-            if os.path.exists(custom_hdr_path):
-                hdr_path = custom_hdr_path
-                print(f"🎨 Using custom HDR: {custom_hdr_path}")
-        
-        # Fallback options if primary HDR not found
-        if not os.path.exists(hdr_path):
-            print(f"⚠️  HDR file not found: {hdr_path}")
-            # Try fallback HDR files
-            fallback_options = ['studio', 'city', 'night', 'interior']
-            for fallback in fallback_options:
-                fallback_path = os.path.join(BLENDER_ROOT, "3.6", "datafiles", "studiolights", "world", f"{fallback}.exr")
-                if os.path.exists(fallback_path):
-                    hdr_path = fallback_path
-                    print(f"🔄 Using fallback HDR: {fallback_path}")
-                    break
-            else:
-                hdr_path = None  # Use simple lighting if no HDR found
-                print(f"⚠️  No HDR files found, using simple lighting")
+        os.makedirs(gbuffer_dir, exist_ok=True)
+        os.makedirs(video_dir, exist_ok=True)
         
         setup_camera_and_lighting(target_object, hdr_path)
         
@@ -3122,6 +3151,7 @@ def process_single_model(model_path, output_root, envmaps):
         bpy.ops.render.render(animation=True)
         
         # Store a copy of the regular frames before any material changes
+        # this is necessary to avoid overwriting them during G-Buffer rendering
         regular_frames_dir = os.path.join(output_dir, "regular_frames")
         os.makedirs(regular_frames_dir, exist_ok=True)
         
@@ -3130,42 +3160,65 @@ def process_single_model(model_path, output_root, envmaps):
             src_frame = os.path.join(output_dir, f"frame_{i:04d}.png")
             dst_frame = os.path.join(regular_frames_dir, f"frame_{i:04d}.png")
             if os.path.exists(src_frame):
-                shutil.copy2(src_frame, dst_frame)
+                try:
+                    shutil.copy2(src_frame, dst_frame)
+                except Exception as e:
+                    pass
         
         # Render normal maps with Eevee (if enabled)
         if OUTPUT_SETTINGS['render_normal_maps']:
-            print(f"🎨 Rendering normal maps for {envmap}...")
-            render_normal_maps_with_eevee(mesh_objects, output_dir, envmap)
+            render_normal_dir = os.path.join(gbuffer_dir, "normal")
+            if os.path.exists(render_normal_dir) and len(os.listdir(render_normal_dir)) == RENDER_SETTINGS['frames']:
+                print(f"🎨 Normal maps already rendered for {file_name}, skipping...")
+            else:
+                print(f"🎨 Rendering normal maps for {file_name}...")
+                render_normal_maps_with_eevee(mesh_objects, gbuffer_dir, envmap)
         else:
-            print(f"⏭️  Normal map rendering disabled for {envmap}")
+            print(f"⏭️  Normal map rendering disabled for {file_name}")
         
         # Render albedo maps with Eevee (if enabled)
         if OUTPUT_SETTINGS['render_albedo_maps']:
-            print(f"🎨 Rendering albedo maps for {envmap}...")
-            render_albedo_maps_with_eevee(mesh_objects, output_dir, envmap)
+            render_albedo_dir = os.path.join(gbuffer_dir, "albedo")
+            if os.path.exists(render_albedo_dir) and len(os.listdir(render_albedo_dir)) == RENDER_SETTINGS['frames']:
+                print(f"🎨 Albedo maps already rendered for {file_name}, skipping...")
+            else:
+                print(f"🎨 Rendering albedo maps for {file_name}...")
+                render_albedo_maps_with_eevee(mesh_objects, gbuffer_dir, envmap)
         else:
-            print(f"⏭️  Albedo map rendering disabled for {envmap}")
+            print(f"⏭️  Albedo map rendering disabled for {file_name}")
         
         # Render specular maps with Eevee (if enabled)
         if OUTPUT_SETTINGS['render_specular_maps']:
-            print(f"✨ Rendering specular maps for {envmap}...")
-            render_specular_maps_with_eevee(mesh_objects, output_dir, envmap)
+            render_specular_dir = os.path.join(gbuffer_dir, "specular")
+            if os.path.exists(render_specular_dir) and len(os.listdir(render_specular_dir)) == RENDER_SETTINGS['frames']:
+                print(f"✨ Specular maps already rendered for {file_name}, skipping...")
+            else:
+                print(f"✨ Rendering specular maps for {file_name}...")
+                render_specular_maps_with_eevee(mesh_objects, gbuffer_dir, envmap)
         else:
-            print(f"⏭️  Specular map rendering disabled for {envmap}")
-        
+            print(f"⏭️  Specular map rendering disabled for {file_name}")
+
         # Render metallic maps with Eevee (if enabled)
         if OUTPUT_SETTINGS['render_metallic_maps']:
-            print(f"🔩 Rendering metallic maps for {envmap}...")
-            render_metallic_maps_with_eevee(mesh_objects, output_dir, envmap)
+            render_metallic_dir = os.path.join(gbuffer_dir, "metallic")
+            if os.path.exists(render_metallic_dir) and len(os.listdir(render_metallic_dir)) == RENDER_SETTINGS['frames']:
+                print(f"🔩 Metallic maps already rendered for {file_name}, skipping...")
+            else:
+                print(f"🔩 Rendering metallic maps for {file_name}...")
+                render_metallic_maps_with_eevee(mesh_objects, gbuffer_dir, envmap)
         else:
-            print(f"⏭️  Metallic map rendering disabled for {envmap}")
+            print(f"⏭️  Metallic map rendering disabled for {file_name}")
         
         # Render roughness maps with Eevee (if enabled)
         if OUTPUT_SETTINGS['render_roughness_maps']:
-            print(f"🌫️ Rendering roughness maps for {envmap}...")
-            render_roughness_maps_with_eevee(mesh_objects, output_dir, envmap)
+            render_roughness_dir = os.path.join(gbuffer_dir, "roughness")
+            if os.path.exists(render_roughness_dir) and len(os.listdir(render_roughness_dir)) == RENDER_SETTINGS['frames']:
+                print(f"🌫️ Roughness maps already rendered for {file_name}, skipping...")
+            else:
+                print(f"🌫️ Rendering roughness maps for {file_name}...")
+                render_roughness_maps_with_eevee(mesh_objects, gbuffer_dir, envmap)
         else:
-            print(f"⏭️  Roughness map rendering disabled for {envmap}")
+            print(f"⏭️  Roughness map rendering disabled for {file_name}")
         
         # Analyze material relationships
         analysis_data = analyze_material_relationships(output_dir, envmap, mesh_objects)
@@ -3177,7 +3230,10 @@ def process_single_model(model_path, output_root, envmaps):
             src_frame = os.path.join(regular_frames_dir, f"frame_{i:04d}.png")
             dst_frame = os.path.join(output_dir, f"frame_{i:04d}.png")
             if os.path.exists(src_frame):
-                shutil.copy2(src_frame, dst_frame)
+                try:
+                    shutil.copy2(src_frame, dst_frame)
+                except Exception as e:
+                    pass
         
         # Clean up temporary directory
         shutil.rmtree(regular_frames_dir, ignore_errors=True)
@@ -3185,12 +3241,12 @@ def process_single_model(model_path, output_root, envmaps):
         # Create MP4s for different map types
         if OUTPUT_SETTINGS['create_mp4']:
             # Create organized video directories
-            model_videos_dir = os.path.join(output_root, "model_videos")
-            normal_videos_dir = os.path.join(output_root, "normal_map_videos")
-            albedo_videos_dir = os.path.join(output_root, "albedo_videos")
-            specular_videos_dir = os.path.join(output_root, "specular_videos")
-            metallic_videos_dir = os.path.join(output_root, "metallic_videos")
-            roughness_videos_dir = os.path.join(output_root, "roughness_videos")
+            model_videos_dir = os.path.join(video_dir, "model_videos")
+            normal_videos_dir = os.path.join(video_dir, "normal_map_videos")
+            albedo_videos_dir = os.path.join(video_dir, "albedo_videos")
+            specular_videos_dir = os.path.join(video_dir, "specular_videos")
+            metallic_videos_dir = os.path.join(video_dir, "metallic_videos")
+            roughness_videos_dir = os.path.join(video_dir, "roughness_videos")
             
             os.makedirs(model_videos_dir, exist_ok=True)
             os.makedirs(normal_videos_dir, exist_ok=True)
@@ -3200,7 +3256,8 @@ def process_single_model(model_path, output_root, envmaps):
             os.makedirs(roughness_videos_dir, exist_ok=True)
             
             # 1. Create regular model MP4
-            model_mp4_path = os.path.join(model_videos_dir, f"{file_name}_{envmap}.mp4")
+            model_mp4_path = os.path.join(model_videos_dir, f"{file_name}/{envmap}.mp4")
+            os.makedirs(os.path.dirname(model_mp4_path), exist_ok=True)
             
             # Check if frames exist
             frame_exists = any(os.path.exists(os.path.join(output_dir, f"frame_{i:04d}.png")) 
@@ -3234,8 +3291,9 @@ def process_single_model(model_path, output_root, envmaps):
                             if os.path.exists(frame_path):
                                 img = imageio.imread(frame_path)
                                 if img.shape[2] == 4:  # RGBA
-                                    rgb, mask = img[:, :, :3], img[:, :, 3:4]
-                                    img = rgb * mask + (1 - mask) * 255
+                                    rgb, mask = img[:, :, :3], img[:, :, 3:4] / 255.
+                                    # img = rgb * mask + (1 - mask) * 255
+                                    img = rgb * mask
                                 imgs.append(img)
                         
                         if imgs:
@@ -3256,17 +3314,19 @@ def process_single_model(model_path, output_root, envmaps):
             
             # 2. Create normal map MP4 (if normal maps were rendered)
             if OUTPUT_SETTINGS['render_normal_maps']:
-                normal_mp4_path = os.path.join(normal_videos_dir, f"{file_name}_{envmap}_normal.mp4")
+                normal_mp4_path = os.path.join(normal_videos_dir, f"{file_name}.mp4")
                 
                 # Check if normal map frames exist in the subdirectory
-                normal_subdir = os.path.join(output_dir, f"normal_{envmap}_")
+                normal_subdir = os.path.join(gbuffer_dir, f"normal")
                 normal_frame_exists = False
                 
                 if os.path.exists(normal_subdir):
                     # Check if Image files exist in the subdirectory
-                    normal_frame_exists = any(os.path.exists(os.path.join(normal_subdir, f"Image{i:04d}.png")) 
+                    format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
+                    normal_frame_exists = any(os.path.exists(os.path.join(normal_subdir, f"Image{i:04d}.{format_ext}")) 
                                             for i in range(1, RENDER_SETTINGS['frames'] + 1))
-                
+                    normal_video_exists = os.path.exists(normal_mp4_path)
+
                 if normal_frame_exists:
                     try:
                         cmd = [
@@ -3285,18 +3345,32 @@ def process_single_model(model_path, output_root, envmaps):
                         if result.returncode == 0:
                             print(f"✅ Created normal map MP4: {normal_mp4_path}")
                         else:
-                            print(f"⚠️  Failed to create normal map MP4: {result.stderr}")
+                            print(f"⚠️  FFMPEG failed, trying imageio fallback...")
+                            try:
+                                imgs = []
+                                for i in range(1, RENDER_SETTINGS['frames'] + 1):
+                                    img_path = os.path.join(normal_subdir, f"Image{i:04d}.{format_ext}")
+                                    if os.path.exists(img_path):
+                                        imgs.append(imageio.imread(img_path))
+                                if imgs:
+                                    imageio.mimsave(normal_mp4_path, imgs)
+                                    print(f"✅ Created normal map MP4 with imageio: {normal_mp4_path}")
+                                else:
+                                    print(f"❌ No frames found for normal map in {normal_subdir}")
+                            except Exception as e:
+                                print(f"Warning: Could not create normal map MP4 with imageio: {e}")
+
                     except Exception as e:
                         print(f"Warning: Could not create normal map MP4: {e}")
                 else:
-                    print(f"❌ No normal map frames found in {normal_subdir}")
+                    print(f"❌ No normal map frames found in {normal_subdir} or ✅ video already exists")
             
             # 3. Create albedo map MP4 (if albedo maps were rendered)
             if OUTPUT_SETTINGS['render_albedo_maps']:
-                albedo_mp4_path = os.path.join(albedo_videos_dir, f"{file_name}_{envmap}_albedo.mp4")
+                albedo_mp4_path = os.path.join(albedo_videos_dir, f"{file_name}.mp4")
                 
                 # Check if albedo map frames exist in the subdirectory
-                albedo_subdir = os.path.join(output_dir, f"albedo_{envmap}_")
+                albedo_subdir = os.path.join(gbuffer_dir, f"albedo")
                 albedo_frame_exists = False
                 
                 if os.path.exists(albedo_subdir):
@@ -3304,7 +3378,8 @@ def process_single_model(model_path, output_root, envmaps):
                     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
                     albedo_frame_exists = any(os.path.exists(os.path.join(albedo_subdir, f"Image{i:04d}.{format_ext}")) 
                                             for i in range(1, RENDER_SETTINGS['frames'] + 1))
-                
+                    albedo_video_exists = os.path.exists(albedo_mp4_path)
+
                 if albedo_frame_exists:
                     try:
                         cmd = [
@@ -3323,18 +3398,31 @@ def process_single_model(model_path, output_root, envmaps):
                         if result.returncode == 0:
                             print(f"✅ Created albedo map MP4: {albedo_mp4_path}")
                         else:
-                            print(f"⚠️  Failed to create albedo map MP4: {result.stderr}")
+                            print(f"⚠️  FFMPEG failed, trying imageio fallback...")
+                            try:
+                                imgs = []
+                                for i in range(1, RENDER_SETTINGS['frames'] + 1):
+                                    img_path = os.path.join(albedo_subdir, f"Image{i:04d}.{format_ext}")
+                                    if os.path.exists(img_path):
+                                        imgs.append(imageio.imread(img_path))
+                                if imgs:
+                                    imageio.mimsave(albedo_mp4_path, imgs)
+                                    print(f"✅ Created albedo map MP4 with imageio: {albedo_mp4_path}")
+                                else:
+                                    print(f"❌ No frames found for albedo map in {albedo_subdir}")
+                            except Exception as e:
+                                print(f"Warning: Could not create albedo map MP4 with imageio: {e}")
                     except Exception as e:
                         print(f"Warning: Could not create albedo map MP4: {e}")
                 else:
-                    print(f"❌ No albedo map frames found in {albedo_subdir}")
+                    print(f"❌ No albedo map frames found in {albedo_subdir} or ✅ video already exists")
             
             # 4. Create specular map MP4 (if specular maps were rendered)
             if OUTPUT_SETTINGS['render_specular_maps']:
-                specular_mp4_path = os.path.join(specular_videos_dir, f"{file_name}_{envmap}_specular.mp4")
+                specular_mp4_path = os.path.join(specular_videos_dir, f"{file_name}.mp4")
                 
                 # Check if specular map frames exist in the subdirectory
-                specular_subdir = os.path.join(output_dir, f"specular_{envmap}_")
+                specular_subdir = os.path.join(gbuffer_dir, f"specular")
                 specular_frame_exists = False
                 
                 if os.path.exists(specular_subdir):
@@ -3342,7 +3430,8 @@ def process_single_model(model_path, output_root, envmaps):
                     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
                     specular_frame_exists = any(os.path.exists(os.path.join(specular_subdir, f"Image{i:04d}.{format_ext}")) 
                                             for i in range(1, RENDER_SETTINGS['frames'] + 1))
-                
+                    specular_video_exists = os.path.exists(specular_mp4_path)
+
                 if specular_frame_exists:
                     try:
                         cmd = [
@@ -3361,18 +3450,31 @@ def process_single_model(model_path, output_root, envmaps):
                         if result.returncode == 0:
                             print(f"✅ Created specular map MP4: {specular_mp4_path}")
                         else:
-                            print(f"⚠️  Failed to create specular map MP4: {result.stderr}")
+                            print(f"⚠️  FFMPEG failed, trying imageio fallback...")
+                            try:
+                                imgs = []
+                                for i in range(1, RENDER_SETTINGS['frames'] + 1):
+                                    img_path = os.path.join(specular_subdir, f"Image{i:04d}.{format_ext}")
+                                    if os.path.exists(img_path):
+                                        imgs.append(imageio.imread(img_path))
+                                if imgs:
+                                    imageio.mimsave(specular_mp4_path, imgs)
+                                    print(f"✅ Created specular map MP4 with imageio: {specular_mp4_path}")
+                                else:
+                                    print(f"❌ No frames found for specular map in {specular_subdir}")
+                            except Exception as e:
+                                print(f"Warning: Could not create specular map MP4 with imageio: {e}")
                     except Exception as e:
                         print(f"Warning: Could not create specular map MP4: {e}")
                 else:
-                    print(f"❌ No specular map frames found in {specular_subdir}")
+                    print(f"❌ No specular map frames found in {specular_subdir} or ✅ video already exists")
             
             # 5. Create metallic map MP4 (if metallic maps were rendered)
             if OUTPUT_SETTINGS['render_metallic_maps']:
-                metallic_mp4_path = os.path.join(metallic_videos_dir, f"{file_name}_{envmap}_metallic.mp4")
+                metallic_mp4_path = os.path.join(metallic_videos_dir, f"{file_name}.mp4")
                 
                 # Check if metallic map frames exist in the subdirectory
-                metallic_subdir = os.path.join(output_dir, f"metallic_{envmap}_")
+                metallic_subdir = os.path.join(gbuffer_dir, f"metallic")
                 metallic_frame_exists = False
                 
                 if os.path.exists(metallic_subdir):
@@ -3380,7 +3482,8 @@ def process_single_model(model_path, output_root, envmaps):
                     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
                     metallic_frame_exists = any(os.path.exists(os.path.join(metallic_subdir, f"Image{i:04d}.{format_ext}")) 
                                             for i in range(1, RENDER_SETTINGS['frames'] + 1))
-                
+                    metallic_video_exists = os.path.exists(metallic_mp4_path)
+
                 if metallic_frame_exists:
                     try:
                         cmd = [
@@ -3399,18 +3502,31 @@ def process_single_model(model_path, output_root, envmaps):
                         if result.returncode == 0:
                             print(f"✅ Created metallic map MP4: {metallic_mp4_path}")
                         else:
-                            print(f"⚠️  Failed to create metallic map MP4: {result.stderr}")
+                            print(f"⚠️  FFMPEG failed, trying imageio fallback...")
+                            try:
+                                imgs = []
+                                for i in range(1, RENDER_SETTINGS['frames'] + 1):
+                                    img_path = os.path.join(metallic_subdir, f"Image{i:04d}.{format_ext}")
+                                    if os.path.exists(img_path):
+                                        imgs.append(imageio.imread(img_path))
+                                if imgs:
+                                    imageio.mimsave(metallic_mp4_path, imgs)
+                                    print(f"✅ Created metallic map MP4 with imageio: {metallic_mp4_path}")
+                                else:
+                                    print(f"❌ No frames found for metallic map in {metallic_subdir}")
+                            except Exception as e:
+                                print(f"Warning: Could not create metallic map MP4 with imageio: {e}")
                     except Exception as e:
                         print(f"Warning: Could not create metallic map MP4: {e}")
                 else:
-                    print(f"❌ No metallic map frames found in {metallic_subdir}")
+                    print(f"❌ No metallic map frames found in {metallic_subdir} or ✅ video already exists")
             
             # 6. Create roughness map MP4 (if roughness maps were rendered)
             if OUTPUT_SETTINGS['render_roughness_maps']:
-                roughness_mp4_path = os.path.join(roughness_videos_dir, f"{file_name}_{envmap}_roughness.mp4")
+                roughness_mp4_path = os.path.join(roughness_videos_dir, f"{file_name}.mp4")
                 
                 # Check if roughness map frames exist in the subdirectory
-                roughness_subdir = os.path.join(output_dir, f"roughness_{envmap}_")
+                roughness_subdir = os.path.join(gbuffer_dir, f"roughness")
                 roughness_frame_exists = False
                 
                 if os.path.exists(roughness_subdir):
@@ -3418,6 +3534,7 @@ def process_single_model(model_path, output_root, envmaps):
                     format_ext = 'exr' if OUTPUT_SETTINGS['other_maps_format'] == 'OPEN_EXR' else 'png'
                     roughness_frame_exists = any(os.path.exists(os.path.join(roughness_subdir, f"Image{i:04d}.{format_ext}")) 
                                             for i in range(1, RENDER_SETTINGS['frames'] + 1))
+                    roughness_video_exists = os.path.exists(roughness_mp4_path)
                 
                 if roughness_frame_exists:
                     try:
@@ -3437,11 +3554,24 @@ def process_single_model(model_path, output_root, envmaps):
                         if result.returncode == 0:
                             print(f"✅ Created roughness map MP4: {roughness_mp4_path}")
                         else:
-                            print(f"⚠️  Failed to create roughness map MP4: {result.stderr}")
+                            print(f"⚠️  FFMPEG failed, trying imageio fallback...")
+                            try:
+                                imgs = []
+                                for i in range(1, RENDER_SETTINGS['frames'] + 1):
+                                    img_path = os.path.join(roughness_subdir, f"Image{i:04d}.{format_ext}")
+                                    if os.path.exists(img_path):
+                                        imgs.append(imageio.imread(img_path))
+                                if imgs:
+                                    imageio.mimsave(roughness_mp4_path, imgs)
+                                    print(f"✅ Created roughness map MP4 with imageio: {roughness_mp4_path}")
+                                else:
+                                    print(f"❌ No frames found for roughness map in {roughness_subdir}")
+                            except Exception as e:
+                                print(f"Warning: Could not create roughness map MP4 with imageio: {e}")
                     except Exception as e:
                         print(f"Warning: Could not create roughness map MP4: {e}")
                 else:
-                    print(f"❌ No roughness map frames found in {roughness_subdir}")
+                    print(f"❌ No roughness map frames found in {roughness_subdir} or ✅ video already exists")
         else:
             # Just check if frames were created
             frame_exists = any(os.path.exists(os.path.join(output_dir, f"frame_{i:04d}.png")) 
@@ -3565,13 +3695,13 @@ def create_material_property_transition_video(output_root):
     print("🎬 Creating material property transition video...")
     
     # Video directories
-    model_videos_dir = os.path.join(output_root, "model_videos")
-    albedo_videos_dir = os.path.join(output_root, "albedo_videos")
-    normal_videos_dir = os.path.join(output_root, "normal_map_videos")
-    specular_videos_dir = os.path.join(output_root, "specular_videos")
-    metallic_videos_dir = os.path.join(output_root, "metallic_videos")
-    roughness_videos_dir = os.path.join(output_root, "roughness_videos")
-    compositions_dir = os.path.join(output_root, "compositions")
+    model_videos_dir = os.path.join(output_root, 'videos', "model_videos")
+    albedo_videos_dir = os.path.join(output_root, 'videos', "albedo_videos")
+    normal_videos_dir = os.path.join(output_root, 'videos', "normal_map_videos")
+    specular_videos_dir = os.path.join(output_root, 'videos', "specular_videos")
+    metallic_videos_dir = os.path.join(output_root, 'videos', "metallic_videos")
+    roughness_videos_dir = os.path.join(output_root, 'videos', "roughness_videos")
+    compositions_dir = os.path.join(output_root, 'videos', "compositions", "separate")
     
     os.makedirs(compositions_dir, exist_ok=True)
     
@@ -3580,19 +3710,17 @@ def create_material_property_transition_video(output_root):
         print("❌ No model videos directory found")
         return
     
-    model_videos = [f for f in os.listdir(model_videos_dir) if f.endswith('.mp4')]
+    model_videos = [f for f in os.listdir(model_videos_dir)]
     if not model_videos:
         print("❌ No model videos found")
         return
     
     # Group videos by object name (remove environment suffix)
     object_groups = {}
-    for video in model_videos:
+    for objname in model_videos:
         # Extract object name (e.g., "pumpkin-scan_2K_a81d6733-20a3-4000-80d2-0ee5ed8845de_city.mp4" -> "pumpkin-scan_2K_a81d6733-20a3-4000-80d2-0ee5ed8845de")
-        base_name = video.replace('_city.mp4', '').replace('_night.mp4', '')
-        if base_name not in object_groups:
-            object_groups[base_name] = {}
-        object_groups[base_name][video] = os.path.join(model_videos_dir, video)
+        if objname not in object_groups:
+            object_groups[objname] = {}
     
     print(f"📦 Found {len(object_groups)} objects for material property transition video")
     
@@ -3630,11 +3758,13 @@ def create_material_property_transition_video(output_root):
         
         # Get lighting videos (city and night)
         lighting_videos = {}
-        for video_path in videos.values():
-            if '_city.mp4' in video_path:
-                lighting_videos['city'] = video_path
-            elif '_night.mp4' in video_path:
-                lighting_videos['night'] = video_path
+        for env in ENVIRONMENT_MAPS:
+            if os.path.isfile(env):
+                video_path = os.path.join(model_videos_dir, obj_name, f"{os.path.splitext(os.path.basename(env))[0]}.mp4")
+            else:
+                video_path = os.path.join(model_videos_dir, obj_name, f"{env}.mp4")
+            if os.path.exists(video_path):
+                lighting_videos[env] = video_path
         
         # Create the transition sequence
         transition_sequence = []
@@ -3645,11 +3775,11 @@ def create_material_property_transition_video(output_root):
             if prop in property_videos:
                 transition_sequence.append(property_videos[prop])
         
-        # Add lighting environments (8 unique lighting conditions)
-        lighting_order = ['city', 'night', 'studio', 'sunset', 'sunrise', 'forest', 'courtyard', 'interior']
-        for lighting in lighting_order:
-            if lighting in lighting_videos:
-                transition_sequence.append(lighting_videos[lighting])
+        # Add lighting environments
+        for lighting in ENVIRONMENT_MAPS:
+            env = os.path.splitext(os.path.basename(lighting))[0] if os.path.isfile(lighting) else lighting
+            if env in lighting_videos:
+                transition_sequence.append(lighting_videos[env])
         
         if len(transition_sequence) < 2:
             print(f"⚠️  Not enough videos for {obj_name} (need at least 2, found {len(transition_sequence)})")
@@ -3685,8 +3815,21 @@ def create_material_property_transition_video(output_root):
                 print(f"✅ Created material property transition: {output_path}")
                 print(f"   Sequence: {' -> '.join([os.path.basename(v) for v in transition_sequence])}")
             else:
-                print(f"❌ Failed to create transition video: {result.stderr}")
-            
+                print(f"⚠️  FFMPEG failed, trying imageio fallback...")
+                try:
+                    imgs = []
+                    for video_path in transition_sequence:
+                        reader = imageio.get_reader(video_path)
+                        for frame in reader:
+                            imgs.append(frame)
+                    if imgs:
+                        imageio.mimsave(output_path, imgs, fps=60)
+                        print(f"✅ Created material property transition with imageio: {output_path}")
+                    else:
+                        print(f"❌ No frames found to create transition video for {obj_name}")
+                except Exception as e:
+                    print(f"❌ Error creating transition video with imageio: {e}")
+
             # Clean up concat file
             os.remove(concat_file)
             
@@ -3721,16 +3864,13 @@ def main():
     
     # Save results
     save_results(results, RESULTS_DIR)
-
-    # Create video compositions
-    create_video_compositions(results['rendered_models'], OUTPUT_ROOT)
     
-    # Create comprehensive transition videos (8 lighting + 4 material maps)
-    create_comprehensive_transition_videos(results['rendered_models'], OUTPUT_ROOT, transition_duration=GRID_SETTINGS['lighting_transition_duration'])
+    # # Create video compositions
+    # create_video_compositions(results['rendered_models'], f'{OUTPUT_ROOT}/videos')
     
-    # Create material property transition videos
-    if OUTPUT_SETTINGS['create_material_transition_video']:
-        create_material_property_transition_video(OUTPUT_ROOT)
+    # # Create material property transition videos
+    # if OUTPUT_SETTINGS['create_material_transition_video']:
+    #     create_material_property_transition_video(OUTPUT_ROOT)
     
     # Print final summary
     print("\n" + "="*60)
